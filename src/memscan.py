@@ -99,8 +99,8 @@ def find_pattern(blob, sequence):
   for i in range(len(blob)):
     if blob[i] == sequence[0]:
       for j in range(1, len(sequence)):
-        if sequence[j] == '?':
-          continue
+        #if sequence[j] == '?':
+        #  continue
         if blob[i+j] != sequence[j]:
           break
       else:
