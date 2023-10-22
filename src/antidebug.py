@@ -1,79 +1,36 @@
 import lldb
-import os
-import sys
-import struct
-import time
-from colorama import Fore, Back, Style
+from utils import *
 
-process = None
-target = None
+def get_target():
+    target = lldb.debugger.GetSelectedTarget()
+    if not target:
+        raise Exception("[-] error: no target available. please add a target to lldb.")
+    return target
 
-def __lldb_init_module(debugger, internal_dict):
-    debugger.HandleCommand('command script add -f antidebug.main antidebug')
-
-def plog(message):
-    print(Fore.GREEN + '[+]: {}'.format(message) + Fore.RESET)
-
-def mlog(message):
-    print(Fore.RED + '[-]: {}'.format(message) + Fore.RESET)
-
-def clog(message):
-    print(Fore.YELLOW + '[*]: {}'.format(message) + Fore.RESET)
-
-def log(message):
-    print(Fore.WHITE + '[.]: {}'.format(message) + Fore.RESET)
-
-def mem_read_int32(address):
-    error = lldb.SBError()
-    data = process.ReadMemory(address, 4, error)
-    if error.Success():
-        data = struct.unpack("<I", data)[0]
-        return data
-    else:
-        raise Exception("Failed to read memory at address: " + str(address))
-    
-def mem_read_int64(address):
-    error = lldb.SBError()
-    data = process.ReadMemory(address, 8, error)
-    if error.Success():
-        data = struct.unpack("<Q", data)[0]
-        return data
-    else:
-        raise Exception("Failed to read memory at address: " + str(address))
+def get_process():
+    # process
+    # A read only property that returns an lldb object that represents the process (lldb.SBProcess) that this target owns.
+    return get_target().process
 
 
-def mem_write_int32(address, value):
-    data = struct.pack("<I", value)
-    error = lldb.SBError()
-    bytes = process.WriteMemory(address, data, error)
-    if error.Success():
-        return bytes
-    else:
-        raise Exception("Failed to write memory at address: " + str(address) + "\ndescription: " + str(error.GetCString()) + "\ntype: " + str(error.GetType()))
-         
+def onSyscallBreakpointHit(frame, bp_loc, internal_dict):
+    oldAsync = lldb.debugger.GetAsync()
+    lldb.debugger.SetAsync(False)
 
-def exec_cmd(debugger, command):
-    res = lldb.SBCommandReturnObject()
-    interpreter = debugger.GetCommandInterpreter()
-    interpreter.HandleCommand(command, res)
+    ilog("SYCALL BREAKPOINT HIT")
+    ilog("IDENTYFACEEEEEEEEEEEE")
 
-    if not res.HasResult():
-        # something error
-        return res.GetError()
-
-    response = res.GetOutput()
-    return response
-
-
-def onPtraceBreakpointHit(frame, bp_loc, internal_dict):
-    plog("ptrace breakpoint hit")
+    lldb.debugger.SetAsync(oldAsync)
+    get_process().Continue()
 
 
 def onSysctlBreakpointHit(frame, bp_loc, internal_dict):
-
     # disable async state
     oldAsync = lldb.debugger.GetAsync()
     lldb.debugger.SetAsync(False)
+    
+    # get current frame thread
+    thread = frame.GetThread()
 
     name = int(frame.FindRegister("x0").GetValue(), 16)
     nameLen = int(frame.FindRegister("x1").GetValue(), 16)
@@ -81,8 +38,6 @@ def onSysctlBreakpointHit(frame, bp_loc, internal_dict):
     oldLenP = int(frame.FindRegister("x3").GetValue(), 16)
     newP = int(frame.FindRegister("x4").GetValue(), 16)
     newLenP = int(frame.FindRegister("x5").GetValue(), 16)
-
-    plog("sysctl breakpoint hit")
 
     # p_flag to indicate not being traced
     e_ppid_offset = int(0x230)
@@ -98,81 +53,88 @@ def onSysctlBreakpointHit(frame, bp_loc, internal_dict):
         pid = mem_read_int32(name + 0xc) # <pid>
 
         # if debug detection is found, then evade it
-        if tipo == 0x1 and arg0 == 0xE and arg1 == 0x1 and pid == process.id:
-            clog("sysctl debug detection found, evading it")
+        if tipo == 0x1 and arg0 == 0xE and arg1 == 0x1 and pid == get_process().id:
 
-            # run process till return
-            thread = frame.GetThread()
-
-            # step until return of function
-            error = lldb.SBError()
-            thread.StepOutOfFrame(frame, error)
-
-            if error.Success():
-                p_flag = mem_read_int32(oldP + 0x20)
-                e_ppid = mem_read_int32(oldP + 0x230)
-
-                clog("[BEFORE] p_flag: {}".format(p_flag))
-                clog("[BEFORE] e_ppid: {}".format(e_ppid))
-
-                # set the p_flag to indicate not being traced
-                mem_write_int32(oldP + p_flag_offset, p_flag_value)
-                # set ppid to 1
-                mem_write_int32(oldP + e_ppid_offset, 1)
-
-                p_flag = mem_read_int32(oldP + p_flag_offset)
-                e_ppid = mem_read_int32(oldP + e_ppid_offset)
-
-                log("==================================")
-
-                clog("[AFTER] p_flag: {}".format(p_flag))
-                clog("[AFTER] e_ppid: {}".format(e_ppid))
-
-                plog("Successfully evaded sysctl debug detection")
-
-            else:
-                mlog("Failed to step out of current sysctl frame")
+            clog("Looking for suspicious symbols")
+            if hasInFrame(thread, ["dynatrace", "identyface", "santanderbrasil"]):                
+                error = lldb.SBError()
+                thread.StepOutOfFrame(frame, error)
+                if error.Success():
+                    clog("Writing flag values")
+                    mem_write_int32(oldP + p_flag_offset, p_flag_value)
+                    mem_write_int32(oldP + e_ppid_offset, 1)
+                    plog("Successfully written flag values")                
 
     # restore async state
     lldb.debugger.SetAsync(oldAsync)
 
     # continue after everything is handled properly
-    process.Continue()
+    get_process().Continue()
 
+def onTaskExceptionPortsBreakpointHit(frame, bp_loc, internal_dict):
+    # disable async state
+    oldAsync = lldb.debugger.GetAsync()
+    lldb.debugger.SetAsync(False)
+    
+    clog("task_get_exception_ports HIT!")
+
+    # disable async state
+    lldb.debugger.SetAsync(oldAsync)
+    get_process().Continue()
 
 def onGetppidBreakpointHit(frame, bp_loc, internal_dict):
-    plog("getppid breakpoint hit")
+    oldAsync = lldb.debugger.GetAsync()
+    lldb.debugger.SetAsync(False)
+
+    clog("getppid hit")
+
+    # get the current thread that is stopped on this frame
+    thread = frame.GetThread()
+
+    if hasInFrame(thread, ["dynatrace", "identyface", "santanderbrasil"]):
+        # step out of the current frame to get to the caller
+        # and change the return value
+        thread.StepOutOfFrame(frame)
+
+        # change the value in the register
+        if not reg_write_int32(frame, "x0", "1"):
+            # mlog("Failed to write register x0")
+            raise Exception("Failed to write register x0")
+
+    plog("getppid finished")
+    # disable async state
+    lldb.debugger.SetAsync(oldAsync)
+    get_process().Continue()
+
+
+def create_bp_by_name(target, name):
+    # clog("Creating breakpoint {}".format(name))
+    bp = target.BreakpointCreateByName(name)
+    if not bp.IsValid():
+        # mlog("Breakpoint {} is not valid".format(name))
+        raise Exception("[-] error: breakpoint {} is not valid".format(name))
+    
+    # plog("Successfully created breakpoint {}".format(name))
+    return bp
 
 
 def main(debugger, arguments, result, internal_dict):
-    global target, process
-    target = debugger.GetSelectedTarget()
-    process = target.GetProcess()
 
+    # create breakpoints on ptrace, sysctl & getppid    
+    # ptraceBp = create_bp_by_name(get_target(), 'ptrace')
+    sysctlBp = create_bp_by_name(get_target(), 'sysctl')
+    # getppidBp = create_bp_by_name(get_target(), 'getppid')
+    # taskExceptionPortsBp = create_bp_by_name(get_target(), 'task_get_exception_ports')
 
-    # create breakpoints on ptrace, sysctl & getppid
-    clog("Creating breakpoints on ptrace, sysctl and getppid")
-    ptraceBp = target.BreakpointCreateByName('ptrace')
-    sysctlBp = target.BreakpointCreateByName('sysctl')
-    getppidBp = target.BreakpointCreateByName('getppid')
-
-    if not ptraceBp.IsValid():
-        mlog("ptrace breakpoint is not valid")
-        return
-    
-    if not sysctlBp.IsValid():
-        mlog("sysctl breakpoint is not valid")
-        return
-    
-    if not getppidBp.IsValid():
-        mlog("getppid breakpoint is not valid")
-        return
-    
     # set the breakpoint hit event callbacks
-    ptraceBp.SetScriptCallbackFunction('antidebug.onPtraceBreakpointHit')
+    # ptraceBp.SetScriptCallbackFunction('antidebug.onPtraceBreakpointHit')
     sysctlBp.SetScriptCallbackFunction('antidebug.onSysctlBreakpointHit')
-    getppidBp.SetScriptCallbackFunction('antidebug.onGetppidBreakpointHit')
-    plog("Breakpoints set successfully")
+    # getppidBp.SetScriptCallbackFunction('antidebug.onGetppidBreakpointHit')
+    # taskExceptionPortsBp.SetScriptCallbackFunction('antidebug.onTaskExceptionPortsBreakpointHit')
 
     # continue process
-    process.Continue()
+    get_process().Continue()
+
+
+def __lldb_init_module(debugger, internal_dict):
+    debugger.HandleCommand('command script add -f antidebug.main debugbypass')

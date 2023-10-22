@@ -1,11 +1,11 @@
 import lldb
 import shlex
 import optparse
+import utils
 
 def __lldb_init_module(debugger, internal_dict):
   debugger.HandleCommand(
   'command script add -f memscan.scan_memory memscan')
-
 
 def help(print=True):
   usage = """Usage: memscan -p <ida_pattern> [-s <section>] [-m <module>] [-b]
@@ -34,90 +34,40 @@ def parse_arguments(arguments, result):
   return opts
 
 def scan_memory(debugger, arguments, result, internal_dict):
-  process = debugger.GetSelectedTarget().GetProcess()
-  target = debugger.GetSelectedTarget()
   module = None
 
   # parse the command line arguments
   opts = parse_arguments(arguments, result)
 
   # find target module
-  for mod in target.module_iter():
-    if (mod.file.basename.lower() == opts.module.lower()):
+  for mod in utils.get_target().module_iter():
+    if mod.file.basename.lower() == opts.module.lower():
       module = mod
       break
 
-  # `get_values` returns a tuple (pattern_bytes, section) from the command arguments
-  # but also makes sure everything is valid
-  values = get_values(opts.section, opts.pattern, module, result)
-  (pattern_bytes, section) = (None, None)
-  if result.Succeeded():
-    (pattern_bytes, section) = values
-  else:
-    return
-
-  start_addr = section.GetLoadAddress(target)
-  bytes_to_read = section.GetByteSize()
-  section_blob = process.ReadMemory(start_addr, bytes_to_read, lldb.SBError())
-
-  offsets = find_pattern(section_blob, pattern_bytes)
-  if len(offsets) <= 0:
+  matches = utils.scan_memory(opts.pattern, opts.section, module)
+  if len(matches) <= 0:
     print("Pattern not found")
     return
 
-  # disassemble the found patterns  
-  for i in range(len(offsets)):
-    if not opts.supress:
-      address = lldb.SBAddress(start_addr + offsets[i], target)
-      instructions = target.ReadInstructions(address, 1)
+  # disassemble the found patterns 
+  if not opts.supress:
+    for i in range(len(matches)):
+      instructions = utils.get_target().ReadInstructions(matches[i], 1)
       for inst in instructions:
-        print("[{}] + Found at ({} = {}): {} {}".format(i, hex(start_addr + offsets[i]), inst.GetAddress(), inst.GetMnemonic(target), inst.GetOperands(target)))
+        print("[{}] + Found at ({} = {}): {} {}".format(i, matches[i]), inst.GetAddress(), inst.GetMnemonic(utils.get_target()), inst.GetOperands(utils.get_target()))
   
   # print the number of found patterns
-  print("[+] {} matching patterns found in section '{}' from module: {}".format(len(offsets), section.GetName(), module.file.basename))
+  print("[+] {} matching patterns found in section '{}' from module: {}".format(len(matches), opts.section, module.file.basename))
 
   # if we want to set breakpoints on the found patterns
   if opts.breakpoint:
     bp = 0
     print("[*] Writing breakpoints")
-    for i in range(len(offsets)):
-      address = lldb.SBAddress(start_addr + offsets[i], target)
-      target.BreakpointCreateBySBAddress(address)
+    for i in range(len(matches)):
+      utils.get_target().BreakpointCreateBySBAddress(matches[i])
       bp += 1
     print("[+] Done. Set {} breakpoints".format(bp))
-
-
-
-def find_pattern(blob, sequence):
-  # check if blob is smaller than sequence
-  if(len(blob) < len(sequence)):
-    return
-
-  offsets = []
-
-  # find patterns
-  for i in range(len(blob)):
-    if blob[i] == sequence[0]:
-      for j in range(1, len(sequence)):
-        #if sequence[j] == '?':
-        #  continue
-        if blob[i+j] != sequence[j]:
-          break
-      else:
-        offsets.append(i)
-
-  return offsets
-
-def get_values(section, pattern, module, result):
-  section = module.FindSection(section)
-  print("Section found: " + str(section))
-  if not section:
-    result.SetError("Couldn't find section: {}".format(section))
-    return
-  
-  # 'little' endian is the default
-  pattern_bytes = bytes([int(x, base=16) for x in pattern.split(' ')])
-  return (pattern_bytes, section)
 
 def generate_option_parser():
   parser = optparse.OptionParser(usage=help(False))
@@ -131,7 +81,7 @@ def generate_option_parser():
   parser.add_option("-m", "--module",
            action="store",
            dest="module",
-           default=get_main_module().file.basename,
+           default=utils.get_main_module().file.basename,
            type="string",
            help="Define pattern endianness")
   
@@ -153,7 +103,10 @@ def generate_option_parser():
            default=False,
            help="Supress output")
   
+  parser.add_option('-l', '--lazy', 
+           action='store_true', 
+           dest='lazy', 
+           default=False, 
+           help='Lazy search')
+  
   return parser
-
-def get_main_module():
-  return lldb.debugger.GetSelectedTarget().GetModuleAtIndex(0)
