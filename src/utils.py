@@ -5,7 +5,15 @@ import datetime
 from colorama import Fore
 import struct
 from keystone import *
+import os
+import pathvalidate as pv
 
+def is_path_valid(path, platform="Windows"):
+    try:
+        pv.validate_filepath(path.replace("\\", "\\\\"), platform)
+        return True
+    except:
+        return False
 
 # logging utilities
 def plog(message):
@@ -39,6 +47,15 @@ def get_process():
   
 def get_main_module():
   return lldb.debugger.GetSelectedTarget().GetModuleAtIndex(0)
+
+def get_registers(frame):
+    result = {}
+    for regs in frame.registers:
+        name = "".join([s[0] for s in regs.name.split()]).lower()
+        result[name] = {}
+        for reg in regs:
+            result[name][reg.name] = reg.value
+    return result
 
 def mem_read_int32(address):
     error = lldb.SBError()
@@ -80,13 +97,12 @@ def reg_write_int32(frame, register, value):
         raise Exception("Failed to write register: " + str(register) + "\ndescription: " + str(error.GetCString()) + "\ntype: " + str(error.GetType()))
 
 # execute debugger command
-def exec_cmd(debugger, command):
+def exec_cmd(command):
     res = lldb.SBCommandReturnObject()
-    interpreter = debugger.GetCommandInterpreter()
+    interpreter = lldb.debugger.GetCommandInterpreter()
     interpreter.HandleCommand(command, res)
 
     if not res.HasResult():
-        # something error
         return res.GetError()
 
     response = res.GetOutput()
@@ -127,8 +143,50 @@ def find_pattern(baseAddr, blob, sequence):
 
   return matches
 
+def create_bp_by_name(target, name, handler, condition=None):    
+    if not isinstance(handler, str):
+        raise Exception("[-] error: handler must be a string")
+    
+    if not isinstance(name, str):
+        raise Exception("[-] error: name must be a string")
+    
+    if condition and not isinstance(condition, str):
+        raise Exception("[-] error: condition must be a string")
+    
+    bp = target.BreakpointCreateByName(name)
+    if not bp.IsValid():
+        raise Exception("[-] error: breakpoint {} is not valid".format(name))
+    
+    if condition:
+        bp.SetCondition(condition)
+        
+    bp.SetScriptCallbackFunction(handler)
+    
+    return bp
+
+def create_bp_by_address(target, address, callback, condition=None):
+    
+    if not isinstance(callback, str):
+        raise Exception("[-] error: handler must be a string")
+    
+    if not address or address <= 0:
+        raise Exception("[-] error: name must be a valid address")
+    
+    if not isinstance(condition, str):
+        raise Exception("[-] error: condition must be a string")
+    
+    bp = target.BreakpointCreateBySBAddress(address, get_target())
+    if not bp.IsValid():
+        raise Exception("[-] error: breakpoint {} is not valid".format(address))
+    
+    if condition:
+        bp.SetCondition(condition)
+        
+    bp.SetScriptCallbackFunction(callback)
+    
+    return bp
+
 def hasInFrame(thread, names):
-    # check if names is array
     if not isinstance(names, list):
         raise Exception("[-] error: names must be an array")
 
@@ -136,9 +194,7 @@ def hasInFrame(thread, names):
         if frame.GetPCAddress().IsValid():
             module = frame.GetModule()
             if module:
-                # get module name
                 module_name = module.GetFileSpec().GetFilename()
-                clog("module name: {}".format(module_name))
                 for name in names:
                     if name.lower() in module_name.lower():
                         return True
